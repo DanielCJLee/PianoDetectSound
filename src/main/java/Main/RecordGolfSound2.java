@@ -1,0 +1,490 @@
+package Main;
+
+
+import Utils.Complex;
+import Process.FFT;
+import org.apache.commons.math3.transform.DftNormalization;
+import org.apache.commons.math3.transform.FastFourierTransformer;
+import org.apache.commons.math3.transform.TransformType;
+
+import javax.sound.sampled.*;
+import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.border.SoftBevelBorder;
+import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.*;
+import java.util.List;
+
+/**
+ * Created by HuuPhuoc on 12/14/15.
+ */
+
+public class RecordGolfSound2 extends JPanel implements ActionListener {
+
+    final int bufSize = 16384;
+
+    Capture capture = new Capture();
+
+    Playback playback = new Playback();
+
+    AudioInputStream audioInputStream;
+
+    JButton playB, captB;
+
+    String errStr;
+
+    double duration;
+
+
+    public RecordGolfSound2() {
+        setLayout(new BorderLayout());
+        SoftBevelBorder sbb = new SoftBevelBorder(SoftBevelBorder.LOWERED);
+        setBorder(new EmptyBorder(5, 5, 5, 5));
+
+        JPanel p1 = new JPanel();
+        p1.setLayout(new BoxLayout(p1, BoxLayout.X_AXIS));
+
+        JPanel p2 = new JPanel();
+        p2.setBorder(sbb);
+        p2.setLayout(new BoxLayout(p2, BoxLayout.Y_AXIS));
+
+        JPanel buttonsPanel = new JPanel();
+        buttonsPanel.setBorder(new EmptyBorder(10, 0, 5, 0));
+        playB = addButton("Play", buttonsPanel, false);
+        captB = addButton("Record", buttonsPanel, true);
+        p2.add(buttonsPanel);
+
+        p1.add(p2);
+        add(p1);
+    }
+
+    public void open() {
+    }
+
+    public void close() {
+        if (playback.thread != null) {
+            playB.doClick(0);
+        }
+        if (capture.thread != null) {
+            captB.doClick(0);
+        }
+    }
+
+    private JButton addButton(String name, JPanel p, boolean state) {
+        JButton b = new JButton(name);
+        b.addActionListener(this);
+        b.setEnabled(state);
+        p.add(b);
+        return b;
+    }
+
+    public void actionPerformed(ActionEvent e) {
+        Object obj = e.getSource();
+        if (obj.equals(playB)) {
+            if (playB.getText().startsWith("Play")) {
+                playback.start();
+                captB.setEnabled(false);
+                playB.setText("Stop");
+            } else {
+                playback.stop();
+                captB.setEnabled(true);
+                playB.setText("Play");
+            }
+        } else if (obj.equals(captB)) {
+            if (captB.getText().startsWith("Record")) {
+                capture.start();
+                playB.setEnabled(false);
+                captB.setText("Stop");
+            } else {
+                capture.stop();
+                playB.setEnabled(true);
+            }
+
+        }
+    }
+
+    /**
+     * Write data to the OutputChannel.
+     */
+    public class Playback implements Runnable {
+
+        SourceDataLine line;
+
+        Thread thread;
+
+        public void start() {
+            errStr = null;
+            thread = new Thread(this);
+            thread.setName("Playback");
+            thread.start();
+        }
+
+        public void stop() {
+            thread = null;
+        }
+
+        private void shutDown(String message) {
+            if ((errStr = message) != null) {
+                System.err.println(errStr);
+            }
+            if (thread != null) {
+                thread = null;
+                captB.setEnabled(true);
+                playB.setText("Play");
+            }
+        }
+
+        public void run() {
+
+            // make sure we have something to play
+            if (audioInputStream == null) {
+                shutDown("No loaded audio to play back");
+                return;
+            }
+            // reset to the beginnning of the stream
+            try {
+                audioInputStream.reset();
+            } catch (Exception e) {
+                shutDown("Unable to reset the stream\n" + e);
+                return;
+            }
+
+            // get an AudioInputStream of the desired format for playback
+
+            AudioFormat.Encoding encoding = AudioFormat.Encoding.PCM_SIGNED;
+            float rate = 44100.0f;
+            int channels = 2;
+            int sampleSize = 16;
+            boolean bigEndian = true;
+
+            AudioFormat format = new AudioFormat(encoding, rate, sampleSize, channels, (sampleSize / 8)
+                    * channels, rate, bigEndian);
+
+            AudioInputStream playbackInputStream = AudioSystem.getAudioInputStream(format,
+                    audioInputStream);
+
+            if (playbackInputStream == null) {
+                shutDown("Unable to convert stream of format " + audioInputStream + " to format " + format);
+                return;
+            }
+
+            // define the required attributes for our line,
+            // and make sure a compatible line is supported.
+
+            DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
+            if (!AudioSystem.isLineSupported(info)) {
+                shutDown("Line matching " + info + " not supported.");
+                return;
+            }
+
+            // get and open the source data line for playback.
+
+            try {
+                line = (SourceDataLine) AudioSystem.getLine(info);
+                line.open(format, bufSize);
+            } catch (LineUnavailableException ex) {
+                shutDown("Unable to open the line: " + ex);
+                return;
+            }
+
+            // play back the captured audio data
+
+            int frameSizeInBytes = format.getFrameSize();
+            int bufferLengthInFrames = line.getBufferSize() / 8;
+            int bufferLengthInBytes = bufferLengthInFrames * frameSizeInBytes;
+            byte[] data = new byte[bufferLengthInBytes];
+            int numBytesRead;
+
+            // start the source data line
+            line.start();
+
+            while (thread != null) {
+                try {
+                    if ((numBytesRead = playbackInputStream.read(data)) == -1) {
+                        break;
+                    }
+                    int numBytesRemaining = numBytesRead;
+                    while (numBytesRemaining > 0) {
+                        numBytesRemaining -= line.write(data, 0, numBytesRemaining);
+                    }
+                } catch (Exception e) {
+                    shutDown("Error during playback: " + e);
+                    break;
+                }
+            }
+            // we reached the end of the stream.
+            // let the data play out, then
+            // stop and close the line.
+            if (thread != null) {
+                line.drain();
+            }
+            line.stop();
+            line.close();
+            line = null;
+            shutDown(null);
+        }
+    } // End class Playback
+
+    /**
+     * Reads data from the input channel and writes to the output stream
+     */
+    double[] resultFFT;
+
+    class Capture implements Runnable {
+
+
+        TargetDataLine targetDataLine;
+
+        Thread thread;
+
+        public void start() {
+            errStr = null;
+            thread = new Thread(this);
+            thread.setName("Capture");
+            thread.start();
+        }
+
+        public void stop() {
+            thread = null;
+        }
+
+        private void shutDown(String message) {
+            if ((errStr = message) != null && thread != null) {
+                thread = null;
+                playB.setEnabled(true);
+                captB.setText("Record");
+                System.err.println(errStr);
+            }
+        }
+
+        public void run() {
+
+            duration = 0;
+            audioInputStream = null;
+
+            // define the required attributes for our targetDataLine,
+            // and make sure a compatible targetDataLine is supported.
+            AudioFormat.Encoding encoding = AudioFormat.Encoding.PCM_SIGNED;
+            float rate = 44100.0f;
+            int channels = 2;
+            int sampleSize = 16;
+            boolean bigEndian = true;
+
+            AudioFormat format = new AudioFormat(encoding, rate, sampleSize, channels, (sampleSize / 8)
+                    * channels, rate, bigEndian);
+
+            DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
+
+            if (!AudioSystem.isLineSupported(info)) {
+                shutDown("Line matching " + info + " not supported.");
+                return;
+            }
+
+            // get and open the target data targetDataLine for capture.
+
+            try {
+                targetDataLine = (TargetDataLine) AudioSystem.getLine(info);
+                targetDataLine.open(format, targetDataLine.getBufferSize());
+            } catch (LineUnavailableException ex) {
+                shutDown("Unable to open the targetDataLine: " + ex);
+                return;
+            } catch (Exception ex) {
+                shutDown(ex.toString());
+                return;
+            }
+
+            // play back the captured audio data
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            int frameSizeInBytes = format.getFrameSize();
+            int bufferLengthInFrames = targetDataLine.getBufferSize() / 8;
+            int bufferLengthInBytes = bufferLengthInFrames * frameSizeInBytes;
+            byte[] data = new byte[bufferLengthInBytes];
+            int numBytesRead;
+
+
+            try {
+                audioInputStream.read(data);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+
+            targetDataLine.start();
+
+            while (thread != null) {
+                if ((numBytesRead = targetDataLine.read(data, 0, bufferLengthInBytes)) == -1) {
+
+                    break;
+                }
+                resultFFT = calculateFFT(data);
+                out.write(data, 0, numBytesRead);
+            }
+
+            // we reached the end of the stream.
+            // stop and close the targetDataLine.
+            targetDataLine.stop();
+            targetDataLine.close();
+            targetDataLine = null;
+
+            // stop and close the output stream
+            try {
+                out.flush();
+                out.close();
+            } catch (IOException ex) {
+                ex.printStackTrace();
+            }
+
+            // load bytes into the audio input stream for playback
+
+            byte audioBytes[] = out.toByteArray();
+            ByteArrayInputStream bais = new ByteArrayInputStream(audioBytes);
+            audioInputStream = new AudioInputStream(bais, format, audioBytes.length / frameSizeInBytes);
+
+            long milliseconds = (long) ((audioInputStream.getFrameLength() * 1000) / format
+                    .getFrameRate());
+            duration = milliseconds / 1000.0;
+
+            try {
+                audioInputStream.reset();
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
+        }
+    } // End class Capture
+
+    public int mPeakPos;
+
+    public static void main(String s[]) {
+        RecordGolfSound rps = new RecordGolfSound();
+        // RecordAudio recordAudio = new RecordAudio();
+        rps.open();
+        JFrame f = new JFrame("Record Piano Sound");
+        f.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        f.getContentPane().add("Center", rps);
+        f.pack();
+        Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
+        int w = 360;
+        int h = 170;
+        //JTextArea textArea = new JTextArea(3, 50);
+        f.setLocation(screenSize.width / 2 - w / 2, screenSize.height / 2 - h / 2);
+        f.setSize(w, h);
+        f.show();
+    }
+
+    public double[] calculateFFT(byte[] signal) {
+        final int mNumberOfFFTPoints = 1024;
+        double mMaxFFTSample;
+
+        double temp;
+        Complex[] y;
+        Complex[] complexSignal = new Complex[mNumberOfFFTPoints];
+        double[] absSignal = new double[mNumberOfFFTPoints / 2];
+
+
+
+
+        for (int i = 0; i < mNumberOfFFTPoints; i++) {
+            temp = (double) ((signal[2 * i] & 0xFF) | (signal[2 * i + 1] << 8)) / 32768.0F;
+            complexSignal[i] = new Complex(temp, 0.0);
+        }
+
+        y = FFT.fft(complexSignal);
+
+        mMaxFFTSample = 0.0;
+        for (int i = 0; i < (mNumberOfFFTPoints / 2); i++) {
+            absSignal[i] = Math.sqrt(Math.pow(y[i].re(), 2) + Math.pow(y[i].im(), 2));
+            if (absSignal[i] > mMaxFFTSample) {
+                mMaxFFTSample = absSignal[i];
+                mPeakPos = i;
+            }
+        }
+
+
+        //Process FFT
+
+        double[] buffer = new double[65536];
+        FastFourierTransformer fft = new FastFourierTransformer(DftNormalization.STANDARD);
+        org.apache.commons.math3.complex.Complex[] resultC = fft.transform(buffer, TransformType.FORWARD);
+        double[] results = new double[resultC.length];
+        for (int index = 0; index < resultC.length; index++) {
+            double real = resultC[index].getReal();
+            double imaginary = resultC[index].getImaginary();
+            results[index] = Math.sqrt(real * real + imaginary * imaginary);
+        }
+        List<Float> found = process(results, (float) 44100.0, resultC.length, 7);
+        for (float f :found) {
+//        System.out.println("Found:" + f);}
+        }
+
+        //End FFT
+
+
+        double freq = Index2Freq(mPeakPos, 44100, 1024);
+
+        String s = closestKey(freq);
+        int f = Integer.parseInt(s);
+
+        if ((f != 301) && (f != 129) && (f != 172) && (f != 0) && (f != 215) && (f != 258) && (f != 86) && (f != 345) && (f != 431) && (f != 388) && (f != 474)) {
+            System.out.println(freq);
+        }
+        return absSignal;
+
+    }
+
+    public double Index2Freq(int i, double samples, int nFFT) {
+        return (double) i * (samples / nFFT);
+    }
+
+     List<Float> process(double results[], float sampleRate, int numSamples, int add) {
+        double average = 0;
+        for (int i = 0; i < results.length; i++) {
+            average += results[i];
+        }
+        average = average / results.length;
+
+        double sums = 0;
+        for (int i = 0; i < results.length; i++) {
+            sums += (results[i] - average) * (results[i] - average);
+        }
+
+        double stdev = Math.sqrt(sums / (results.length - 1));
+
+        ArrayList<Float> found = new ArrayList<Float>();
+        double max = Integer.MIN_VALUE;
+        int maxF = -1;
+        for (int f = 0; f < results.length / 2; f++) {
+            if (results[f] > average + add * stdev) {
+                if (results[f] > max) {
+                    max = results[f];
+                    maxF = f;
+                }
+            } else {
+                if (maxF != -1) {
+                    found.add(maxF * sampleRate / numSamples);
+                    max = Integer.MIN_VALUE;
+                    maxF = -1;
+                }
+            }
+        }
+
+        return (found);
+    }
+
+    static String[] notes = {"A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"};
+
+    public static String closestKey(double freq) {
+        int key = closestKeyIndex(freq);
+        if (key <= 0) { return null; }
+        int range = 1+(key-1)/notes.length;
+        return notes[(key-1)%notes.length] + range;
+    }
+
+    public static int closestKeyIndex(double freq) {
+        return 1+(int)((12*Math.log(freq/440)/Math.log(2) + 49) - 0.5);
+    }
+}
